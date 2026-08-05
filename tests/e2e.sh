@@ -7,7 +7,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$HERE/e2e-run"
-BIN="$(cd "$HERE/.." && pwd)/target/debug/iroh-gate"
+BIN="$(cd "$HERE/.." && pwd)/target/debug/ig"
 rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$WORK"
 
@@ -89,27 +89,27 @@ echo "== daemon A (startup file declares only the http service) =="
 $BIN --socket "$WORK/a.sock" daemon --key "$WORK/a.key" --service "$WORK/services.toml" > a.log 2>&1 &
 DAEMON_PIDS+=($!)
 for _ in $(seq 40); do [[ -S a.sock ]] && break; sleep 0.25; done
-TICKET_A=$(a ticket); echo "  ticket: $TICKET_A"
+TICKET_A=$(a id); echo "  ticket: $TICKET_A"
 
 echo "== daemon B =="
 $BIN --socket "$WORK/b.sock" daemon --key "$WORK/b.key" > b.log 2>&1 &
 DAEMON_PIDS+=($!)
 for _ in $(seq 40); do [[ -S b.sock ]] && break; sleep 0.25; done
-TICKET_B=$(b ticket); echo "  ticket: $TICKET_B"
+TICKET_B=$(b id); echo "  ticket: $TICKET_B"
 
 echo
 echo "== A authorizes B, then declares the rest live =="
-a pin "$TICKET_B" --label outside >/dev/null
-a expose $HTTP_PORT  >/dev/null                                   # already has a backend
-a expose $TCP_PORT   --upstream localhost:9201 >/dev/null         # new tcp service
-a expose $UNIX_PORT  --unix "$SOCKDIR/docker.sock" >/dev/null     # new unix service
-a expose $PLAIN_PORT >/dev/null                                   # no backend: the default
+a peer pin "$TICKET_B" --label outside >/dev/null
+a port expose $HTTP_PORT  >/dev/null                                   # already has a backend
+a port expose $TCP_PORT   --upstream localhost:9201 >/dev/null         # new tcp service
+a port expose $UNIX_PORT  --unix "$SOCKDIR/docker.sock" >/dev/null     # new unix service
+a port expose $PLAIN_PORT >/dev/null                                   # no backend: the default
 echo "  declared without restarting the daemon"
 
 echo
 echo "== list reports what serves each port =="
-L=$(a list)
-echo "$L" | python3 -c 'import json,sys; [print("   ", e["port"], "->", e["backend"]) for e in json.load(sys.stdin)["i_expose"]]'
+L=$(a port ls --format json)
+echo "$L" | python3 -c 'import json,sys; [print("   ", e["port"], "->", e["backend"]) for e in json.load(sys.stdin)["exposed"]]'
 check "list names the http backend"    "\"backend\": \"http (3 routes)\""               "$L"
 check "list names the tcp backend"     "\"backend\": \"tcp localhost:9201\""            "$L"
 check "list names the unix backend"    "\"backend\": \"unix $SOCKDIR/docker.sock\""     "$L"
@@ -121,14 +121,14 @@ echo "== B dials A =="
 # published the instant it binds. Retry until it lands.
 dialed=no
 for i in $(seq 20); do
-  if b add-peer "$TICKET_A" >/dev/null 2>&1; then echo "  connected on attempt $i"; dialed=yes; break; fi
+  if b peer add "$TICKET_A" >/dev/null 2>&1; then echo "  connected on attempt $i"; dialed=yes; break; fi
   sleep 3
 done
 [[ $dialed == yes ]] || { echo "  could not dial A"; cat a.log b.log; exit 1; }
 
 echo -n "  waiting for the two bindable ports "
 for _ in $(seq 60); do
-  n=$(b list 2>/dev/null | grep -Ec "\"port\": ($HTTP_PORT|$UNIX_PORT)")
+  n=$(b status --format json 2>/dev/null | grep -Ec "\"port\": ($HTTP_PORT|$UNIX_PORT)")
   if [[ "$n" == 2 ]]; then echo "ok"; break; fi
   echo -n "."; sleep 1
 done
@@ -137,10 +137,10 @@ done
 echo
 echo "== the port that was already taken on B =="
 check "B could not bind the squatted port"  "failed to bind 127.0.0.1:$TCP_PORT"  "$(cat b.log)"
-b bind $TCP_PORT   --local $REMAP_TO   >/dev/null
-b bind $PLAIN_PORT --local $PLAIN_REMAP >/dev/null
+b port bind $TCP_PORT   --local $REMAP_TO   >/dev/null
+b port bind $PLAIN_PORT --local $PLAIN_REMAP >/dev/null
 sleep 1
-BL=$(b list)
+BL=$(b status --format json)
 check "list shows the remapped local port"  "\"local\": $REMAP_TO"                "$BL"
 R=$(talk $REMAP_TO "select 1")
 check "the service works on the new port"   "db says: select 1"                   "$R"
@@ -170,12 +170,43 @@ check "undeclared port still forwards"      '"site": "plain"'                   
 check "and it kept the original path"       '"path": "/still/works"'              "$R"
 
 echo
+echo "== the contract: dry-run, exit codes, stream hygiene =="
+BEFORE=$(a port ls --format json)
+a port expose 17999 --upstream localhost:9201 --dry-run >/dev/null 2>&1
+AFTER=$(a port ls --format json)
+if [[ "$BEFORE" == "$AFTER" ]]; then
+  echo "  PASS  --dry-run changed nothing"; pass=$((pass+1))
+else
+  echo "  FAIL  --dry-run changed nothing"; fail=$((fail+1))
+fi
+R=$(a port expose 17999 --upstream localhost:9201 --dry-run --format json 2>/dev/null)
+check "--dry-run reports dry_run: true"     '"dry_run": true'                     "$R"
+a port expose 17998 --to deadbeef >/dev/null 2>&1
+check "bad peer key exits 2 (invalid)"      "2"                                   "$?"
+a port unexpose 17997 --dry-run >/dev/null 2>&1
+check "dry-run on an unknown port exits 0"  "0"                                   "$?"
+OUT=$(a port ls 2>/dev/null)
+ERR=$(a port ls 2>&1 >/dev/null)
+check "port ls puts data on stdout"         "$TCP_PORT"                           "$OUT"
+if [[ -z "$ERR" ]]; then
+  echo "  PASS  port ls keeps stderr empty"; pass=$((pass+1))
+else
+  echo "  FAIL  port ls keeps stderr empty"; echo "        got: $ERR"; fail=$((fail+1))
+fi
+OUT=$(a port expose $PLAIN_PORT 2>/dev/null)
+if [[ -z "$OUT" ]]; then
+  echo "  PASS  an action writes nothing to stdout"; pass=$((pass+1))
+else
+  echo "  FAIL  an action writes nothing to stdout"; echo "        got: $OUT"; fail=$((fail+1))
+fi
+
+echo
 echo "== unexpose retires the service, however it is spelled =="
 # Revoking the one remaining grantee by name reaches the same state as revoking
 # them all, so it has to land the same way.
-a unexpose $UNIX_PORT --to "$TICKET_B" >/dev/null
+a port unexpose $UNIX_PORT --to "$TICKET_B" >/dev/null
 sleep 2
-if a list | grep -q "unix $SOCKDIR/docker.sock"; then
+if a port ls --format json | grep -q "unix $SOCKDIR/docker.sock"; then
   echo "  FAIL  --to <last grantee> retires the service"; fail=$((fail+1))
 else
   echo "  PASS  --to <last grantee> retires the service"; pass=$((pass+1))
@@ -183,9 +214,9 @@ fi
 R=$(talk $UNIX_PORT "ping")
 check "and stops serving"                   "refused"                             "$R"
 
-a unexpose $TCP_PORT >/dev/null
+a port unexpose $TCP_PORT >/dev/null
 sleep 2
-if a list | grep -q "tcp localhost:9201"; then
+if a port ls --format json | grep -q "tcp localhost:9201"; then
   echo "  FAIL  bare unexpose retires the service"; fail=$((fail+1))
 else
   echo "  PASS  bare unexpose retires the service"; pass=$((pass+1))

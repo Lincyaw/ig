@@ -34,7 +34,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result};
+
+use crate::protocol::{ErrorKind, Failure};
 use async_trait::async_trait;
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::EndpointId;
@@ -55,6 +57,14 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::tunnel;
+
+/// A caller-facing "you asked for something that cannot work" error, tagged so
+/// the client can exit 2 rather than 1.
+macro_rules! invalid {
+    ($($arg:tt)*) => {
+        return Err(Failure::new(ErrorKind::Invalid, format!($($arg)*)).into())
+    };
+}
 
 // ============================================================================
 // Configuration
@@ -77,11 +87,21 @@ pub enum BackendSpec {
 }
 
 impl BackendSpec {
+    /// One-line description, shared with `Backend::describe` so a dry run and
+    /// the `list` that follows it word the same backend the same way.
+    pub fn describe(&self) -> String {
+        match self {
+            BackendSpec::Http { routes } => plural_routes(routes.len()),
+            BackendSpec::Tcp { upstream } => format!("tcp {upstream}"),
+            BackendSpec::Unix { path } => format!("unix {}", path.display()),
+        }
+    }
+
     pub fn validate(&self, port: u16) -> Result<()> {
         match self {
             BackendSpec::Http { routes } => {
                 if routes.is_empty() {
-                    bail!("http service on port {port} has no routes");
+                    invalid!("http service on port {port} has no routes");
                 }
                 for route in routes {
                     route
@@ -91,12 +111,12 @@ impl BackendSpec {
             }
             BackendSpec::Tcp { upstream } => {
                 if upstream.is_empty() {
-                    bail!("tcp service on port {port} has an empty upstream");
+                    invalid!("tcp service on port {port} has an empty upstream");
                 }
             }
             BackendSpec::Unix { path } => {
                 if path.as_os_str().is_empty() {
-                    bail!("unix service on port {port} has an empty path");
+                    invalid!("unix service on port {port} has an empty path");
                 }
             }
         }
@@ -136,7 +156,7 @@ fn load_toml<T: DeserializeOwned>(path: &Path, what: &str) -> Result<T> {
 pub fn load_routes(path: &Path) -> Result<Vec<Route>> {
     let file: RoutesFile = load_toml(path, "route table")?;
     if file.routes.is_empty() {
-        bail!("route table {} has no [[route]] entries", path.display());
+        invalid!("route table {} has no [[route]] entries", path.display());
     }
     Ok(file.routes)
 }
@@ -147,7 +167,7 @@ pub fn load_routes(path: &Path) -> Result<Vec<Route>> {
 pub fn load_service_file(path: &Path) -> Result<Vec<(u16, BackendSpec)>> {
     let file: ServiceFile = load_toml(path, "service config")?;
     if file.services.is_empty() {
-        bail!(
+        invalid!(
             "service config {} has no [[service]] entries",
             path.display()
         );
@@ -188,10 +208,10 @@ pub struct Route {
 impl Route {
     fn validate(&self) -> Result<()> {
         match (&self.upstream, &self.unix) {
-            (Some(u), None) if u.is_empty() => bail!("route has an empty upstream"),
+            (Some(u), None) if u.is_empty() => invalid!("route has an empty upstream"),
             (Some(_), None) | (None, Some(_)) => Ok(()),
-            (None, None) => bail!("route needs `upstream` or `unix`"),
-            (Some(_), Some(_)) => bail!("route sets both `upstream` and `unix`"),
+            (None, None) => invalid!("route needs `upstream` or `unix`"),
+            (Some(_), Some(_)) => invalid!("route sets both `upstream` and `unix`"),
         }
     }
 
@@ -257,6 +277,10 @@ impl Backend {
     }
 }
 
+fn plural_routes(n: usize) -> String {
+    format!("http ({n} route{})", if n == 1 { "" } else { "s" })
+}
+
 /// What each exposed port is backed by, keyed by the port peers ask for.
 ///
 /// Mutable at runtime, because everything else about an exposed port is: a port
@@ -320,7 +344,7 @@ impl Services {
     /// Startup is single threaded, so the check need not share the write lock.
     pub fn register_new(&self, port: u16, spec: BackendSpec) -> Result<()> {
         if self.contains(port) {
-            bail!("two services both claim port {port}");
+            invalid!("two services both claim port {port}");
         }
         self.register(port, spec)
     }
@@ -727,7 +751,7 @@ mod tests {
     /// the tests exercise `load_service_file` rather than a copy of its body.
     fn parse(text: &str) -> Result<Vec<(u16, BackendSpec)>> {
         let dir = std::env::temp_dir().join(format!(
-            "iroh-gate-parse-{}-{:?}",
+            "ig-parse-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

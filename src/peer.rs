@@ -7,7 +7,7 @@
 
 use crate::enroll::{Pins, Tokens};
 use crate::grants::Grants;
-use crate::protocol::{BindingInfo, PeerInfo, PeerMessage, ALPN};
+use crate::protocol::{BindingInfo, ErrorKind, Failure, PeerInfo, PeerMessage, ALPN};
 use crate::service::Services;
 use crate::tunnel::{self, PeerConnection};
 use anyhow::{anyhow, Context, Result};
@@ -129,11 +129,13 @@ impl PeerManager {
         ticket: &str,
         enroll_token: Option<String>,
     ) -> Result<()> {
-        let endpoint_id: EndpointId = ticket.parse().context("invalid ticket")?;
+        let endpoint_id: EndpointId = ticket
+            .parse()
+            .map_err(|e| Failure::new(ErrorKind::Invalid, format!("invalid ticket: {e}")))?;
 
         // Check if already connected
         if self.peers.contains_key(&endpoint_id) {
-            return Err(anyhow!("peer already exists"));
+            return Err(Failure::new(ErrorKind::Conflict, "peer already exists").into());
         }
 
         // Connect to the peer
@@ -141,7 +143,7 @@ impl PeerManager {
             .endpoint
             .connect(endpoint_id, ALPN)
             .await
-            .context("failed to connect to peer")?;
+            .map_err(|e| Failure::new(ErrorKind::NotFound, format!("cannot reach peer: {e}")))?;
 
         info!("connected to {}", endpoint_id);
 
@@ -165,7 +167,9 @@ impl PeerManager {
     /// Register a peer pinned at a previous enrollment (loaded at startup).
     /// We never dial it -- it phones home.
     pub fn add_pinned(self: &Arc<Self>, key: &str, label: &str) -> Result<()> {
-        let endpoint_id: EndpointId = key.parse().context("invalid pinned key")?;
+        let endpoint_id: EndpointId = key
+            .parse()
+            .map_err(|e| Failure::new(ErrorKind::Invalid, format!("invalid peer key: {e}")))?;
         if self.peers.contains_key(&endpoint_id) {
             return Ok(());
         }

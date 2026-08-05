@@ -1,10 +1,10 @@
-# iroh-gate
+# ig
 
 Reach a machine's internal network from outside it.
 
 You have a machine that can see things you cannot -- an internal site that
 resolves only in its DNS, a database on another internal host, a socket that
-exists only on its filesystem. iroh-gate makes those reachable from elsewhere,
+exists only on its filesystem. ig makes those reachable from elsewhere,
 as ordinary ports on `localhost`.
 
 Neither machine needs an open inbound port, a public IP, or a relay you run.
@@ -49,16 +49,15 @@ path = "/var/run/docker.sock"
 ```
 
 ```sh
-iroh-gate daemon --service services.toml
+ig daemon --service services.toml
 # Ticket: e51a1db43748a73b44c12233239cbb36a763953c7901be97443cf075c02abce2
-iroh-gate grant-token --label desktop
-# 7fd25613dd5e17cb...   (one-time, valid 5 minutes)
 ```
 
-The machine outside dials in with that token:
+The machine outside dials in with a one-time token:
 
 ```sh
-iroh-gate daemon -a e51a1db4... --enroll 7fd25613dd5e17cb...
+ig peer token --label desktop > /run/token   # on the laptop
+ig daemon -a e51a1db4... --enroll-file /run/token
 ```
 
 The three ports show up on its `localhost`:
@@ -77,31 +76,53 @@ connection restores on its own.
 Not published anywhere. Build it:
 
 ```sh
-cargo build --release    # target/release/iroh-gate
+cargo build --release    # target/release/ig
 ```
 
 ## Usage
 
 ```
-iroh-gate [--socket <path>] <command>
+ig [OPTIONS] <COMMAND>
 ```
 
 ### Commands
 
+Noun first, verb second, so the tree is walkable: `ig peer --help` lists what
+you can do to a peer, `ig port --help` what you can do to a port.
+
 ```
-daemon [options]           Start the daemon
-ticket                     Print the daemon's ticket
-grant-token --label <l>    Mint a one-time enrollment token (valid 5 min)
-pin <key> --label <l>      Authorize a peer by key, no token (host-attested)
-add-peer <ticket>          Connect to a peer
-remove-peer <ticket>       Disconnect from a peer (and drop its pin)
-expose <port> [--to <key>] Grant a port to peers (default: all known)
-              [--upstream <host:port> | --unix <path> | --routes <file>]
-                           ... and declare what serves it
-unexpose <port> [--to <k>] Revoke grants for a port (or one peer's grant)
-bind <port> --local <p>    Bind a peer's port to a different local port
-list                       Show peers, grants, and bindings (JSON)
+ig daemon [options]              Start the daemon
+ig id                            Print this daemon's endpoint id
+ig status                        Peers, exposed ports, and local bindings
+
+ig peer add <ticket>             Connect to a peer
+ig peer rm <ticket>              Disconnect, and drop its pin
+ig peer ls                       Known peers and what they expose to us
+ig peer pin <key> --label <l>    Authorize by key, no token
+ig peer token --label <l>        Mint a one-time enrollment token (5 min)
+
+ig port expose <port> [--to <key>]           Grant a port
+       [--upstream <host:port> | --unix <path> | --routes <file>]
+                                             ... and declare what serves it
+ig port unexpose <port> [--to <key>]         Revoke grants
+ig port ls                                   Exposed ports and what serves each
+ig port bind <port> --local <p>              Land a peer's port elsewhere
+
+ig completion <shell>            Print a shell completion script
 ```
+
+Global flags, valid on every command:
+
+| Flag | Env | Meaning |
+|------|-----|---------|
+| `--socket <path>` | `IG_SOCKET` | The daemon's control socket |
+| `--format text\|json` | `IG_FORMAT` | Result format on stdout |
+| `--quiet` | `IG_QUIET` | Drop status chatter from stderr |
+| `--no-input` | | Assert that nothing will prompt (already true) |
+| `--dry-run` | | On every mutating command: report, change nothing |
+
+`--dump-schema` prints the whole command tree as JSON, generated from the
+parser, for anything that needs to construct invocations without guessing.
 
 ### Daemon options
 
@@ -110,11 +131,11 @@ list                       Show peers, grants, and bindings (JSON)
 | `--host` | `127.0.0.1` | Where ports with no declared service forward to |
 | `-a, --add` | | Add peer on startup (repeatable) |
 | `-e, --expose` | | Expose port to the `-a` peers (repeat or comma-separate) |
-| `--enroll` | | One-time token to present to the `-a` peers |
+| `--enroll-file` | | Read the one-time token from a file (preferred) |
+| `--enroll` | | The token inline; leaks through argv, prefer `--enroll-file` |
 | `--service` | | Declare services on startup, from a TOML file (repeatable) |
 | `--bind` | | Remap a peer's port as `REMOTE:LOCAL` (repeatable) |
-| `--key` | `~/.local/state/iroh-gate/key` | Secret key path (created if missing) |
-| `--socket` | `/tmp/iroh-gate.sock` | Unix socket path |
+| `--key` | `~/.local/state/ig/key` | Secret key path (created if missing) |
 
 ## Services
 
@@ -125,10 +146,10 @@ listening locally, and not enough when it lives behind that machine.
 `expose` can say what serves the port instead:
 
 ```sh
-iroh-gate expose 5432 --upstream db.internal:5432   # any host:port reachable there
-iroh-gate expose 6000 --unix /var/run/docker.sock   # a socket that exists only there
-iroh-gate expose 8080 --routes internal-sites.toml  # a reverse proxy
-iroh-gate expose 3002                               # no backend: --host:3002
+ig port expose 5432 --upstream db.internal:5432   # any host:port reachable there
+ig port expose 6000 --unix /var/run/docker.sock   # a socket that exists only there
+ig port expose 8080 --routes internal-sites.toml  # a reverse proxy
+ig port expose 3002                               # no backend: --host:3002
 ```
 
 Declared live, like every other grant -- no restart. `--service <file>` makes the
@@ -182,7 +203,7 @@ names a proven identity, not a shareable address: you cannot hand out reach by
 leaking a string ([ADR 0001](docs/adr/0001-directed-grants.md)).
 
 An incoming connection from an unknown key is refused unless it presents a
-one-time token from `grant-token`. A valid claim pins the peer's key under the
+one-time token from `ig peer token`. A valid claim pins the peer's key under the
 token's label and is then spent; pins persist across restarts, so a reboot does
 not orphan enrolled workloads ([ADR 0002](docs/adr/0002-token-enrollment.md)).
 `pin` authorizes a key directly when nothing secret should travel into the
@@ -203,9 +224,9 @@ A peer picks the numbers it announces, and one may already be taken on your
 machine:
 
 ```sh
-iroh-gate bind 5432 --local 5433    # the peer's 5432 arrives on localhost:5433
-iroh-gate bind 5432 --local 0       # or let the OS pick; list reports which
-iroh-gate bind 5432 --clear         # back to binding the announced port
+ig port bind 5432 --local 5433    # the peer's 5432 arrives on localhost:5433
+ig port bind 5432 --local 0       # or let the OS pick; status reports which
+ig port bind 5432 --clear         # back to binding the announced port
 ```
 
 It takes effect immediately -- the existing listener is torn down and rebuilt,
@@ -214,19 +235,32 @@ same at startup.
 
 ## Inspecting
 
-`list` reports what serves each port and where each binding actually landed:
+`ig status` shows the whole picture; `ig peer ls` and `ig port ls` show one
+part each.
+
+```
+$ ig status
+id  e51a1db43748a73b44c12233239cbb36a763953c7901be97443cf075c02abce2
+
+peers
+  2ecee2029149  desktop     online   exposes -
+
+exposed
+  3002    default 127.0.0.1:3002          to 2ecee2029149
+  5432    tcp db.internal:5432            to 2ecee2029149
+  6000    unix /var/run/docker.sock       to 2ecee2029149
+  8080    http (2 routes)                 to 2ecee2029149
+
+bindings
+  (none)
+```
+
+Add `--format json` to any of them for the parsing contract:
 
 ```json
 {
-  "i_expose": [
-    {"port": 3002, "backend": "default 127.0.0.1:3002"},
-    {"port": 5432, "backend": "tcp db.internal:5432"},
-    {"port": 6000, "backend": "unix /var/run/docker.sock"},
-    {"port": 8080, "backend": "http (2 routes)"}
-  ],
-  "bindings": [
-    {"port": 5432, "local": 5433, "peer": "e51a1db4..."}
-  ]
+  "exposed": [{"port": 5432, "backend": "tcp db.internal:5432"}],
+  "grants":  [{"port": 5432, "to": "2ecee2029149..."}]
 }
 ```
 
@@ -253,6 +287,21 @@ peer's key hashes to a stable synthetic address in `100.64.0.0/10`.
 pingora keys its upstream connection pool on the resolved address, so
 re-resolving a name whose records rotate would hand it a different key each time
 and defeat keep-alive.
+
+## Driving it from a program
+
+stdout carries results, stderr carries everything else, and the exit code says
+what happened -- `2` invalid, `3` not found, `5` conflict, `7` no daemon, and so
+on. Nothing needs to grep an error message to decide whether to retry.
+
+```sh
+ig status --format json | jq -r '.exposed[].port'
+ig port expose 8080 --routes sites.toml --dry-run --format json
+```
+
+[docs/CONTRACT.md](docs/CONTRACT.md) is the full reference: streams, exit codes,
+every JSON shape, environment variables, and what is stable versus what is
+human-facing prose.
 
 ## Limitations
 

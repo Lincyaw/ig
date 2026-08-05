@@ -3,7 +3,9 @@
 use crate::enroll::{Pins, Tokens};
 use crate::grants::Grants;
 use crate::peer::PeerManager;
-use crate::protocol::{ExposedInfo, GrantInfo, ListInfo, Request, Response, ALPN};
+use crate::protocol::{
+    ErrorKind, ExposedInfo, Failure, GrantInfo, ListInfo, Request, Response, ALPN,
+};
 use crate::service::Services;
 use anyhow::{anyhow, Context, Result};
 use iroh::{Endpoint, EndpointId, SecretKey};
@@ -29,7 +31,7 @@ pub struct Daemon {
     services: Arc<Services>,
 }
 
-/// Default key location: $XDG_STATE_HOME/iroh-gate/key (~/.local/state/iroh-gate/key)
+/// Default key location: $XDG_STATE_HOME/ig/key (~/.local/state/ig/key)
 fn default_key_path() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -37,7 +39,7 @@ fn default_key_path() -> PathBuf {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
         })
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("iroh-gate").join("key")
+    base.join("ig").join("key")
 }
 
 /// Load the secret key from `path`, or generate one and persist it there.
@@ -209,76 +211,168 @@ impl Daemon {
         self.peers.handle_connection(conn).await
     }
 
-    /// Handle a request from the CLI client
+    /// Handle a request from the CLI client.
+    ///
+    /// Every mutating arm validates fully before it changes anything, so
+    /// `dry_run` can return the same verdict the real run would reach by
+    /// stopping just short of the mutation. That is only trustworthy because
+    /// validation comes first everywhere -- keep it that way.
     pub async fn handle_request(self: &Arc<Self>, request: Request) -> Response {
         match request {
-            Request::AddPeer { ticket } => match self.peers.add_peer(&ticket, None).await {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e.to_string()),
-            },
-            Request::RemovePeer { ticket } => match self.peers.remove_peer(&ticket).await {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e.to_string()),
-            },
-            Request::Expose { port, to, backend } => {
-                // Explicit grantees, or every currently known peer
+            Request::AddPeer { ticket, dry_run } => {
+                match parse_key(&ticket) {
+                    Err(e) => return Response::error(e),
+                    Ok(id) if dry_run => {
+                        return Response::done(true, format!("connect to peer {id}"))
+                    }
+                    Ok(_) => {}
+                }
+                match self.peers.add_peer(&ticket, None).await {
+                    Ok(()) => Response::done(false, format!("connected to peer {ticket}")),
+                    Err(e) => Response::error(e),
+                }
+            }
+
+            Request::RemovePeer { ticket, dry_run } => {
+                match parse_key(&ticket) {
+                    Err(e) => return Response::error(e),
+                    Ok(id) if dry_run => {
+                        return Response::done(true, format!("disconnect from peer {id}"))
+                    }
+                    Ok(_) => {}
+                }
+                match self.peers.remove_peer(&ticket).await {
+                    Ok(()) => Response::done(false, format!("removed peer {ticket}")),
+                    Err(e) => Response::error(e),
+                }
+            }
+
+            Request::Expose {
+                port,
+                to,
+                backend,
+                dry_run,
+            } => {
+                // Resolve grantees before registering: a typo in --to must not
+                // leave a backend declared for a port nobody can reach.
                 let grantees: Result<Vec<EndpointId>> = if to.is_empty() {
                     let ids = self.peers.peer_ids();
                     if ids.is_empty() {
-                        Err(anyhow!("no peers to grant to; use --to <key>"))
+                        Err(Failure::new(
+                            ErrorKind::Invalid,
+                            "no peers to grant to; use --to <key>",
+                        )
+                        .into())
                     } else {
                         Ok(ids)
                     }
                 } else {
-                    to.iter()
-                        .map(|k| k.parse().context("invalid peer key"))
-                        .collect()
+                    to.iter().map(|k| parse_key(k)).collect()
                 };
-                // Resolve grantees before registering: a typo in --to should
-                // not leave a backend declared for a port nobody can reach.
-                match grantees {
-                    Ok(grantees) => {
-                        if let Some(spec) = backend {
-                            if let Err(e) = self.services.register(port, spec) {
-                                return Response::Error(e.to_string());
-                            }
-                        }
-                        match self.expose(port, &grantees).await {
-                            Ok(()) => Response::Ok,
-                            Err(e) => Response::Error(e.to_string()),
-                        }
+                let grantees = match grantees {
+                    Ok(g) => g,
+                    Err(e) => return Response::error(e),
+                };
+
+                // Validating the spec here is what lets --dry-run reject a bad
+                // route table without registering it.
+                if let Some(spec) = &backend {
+                    if let Err(e) = spec.validate(port) {
+                        return Response::error(e);
                     }
-                    Err(e) => Response::Error(e.to_string()),
+                }
+                let served = match &backend {
+                    Some(spec) => spec.describe(),
+                    None => self.services.describe(port),
+                };
+                let detail = format!(
+                    "expose {port} to {} peer(s), served by {served}",
+                    grantees.len()
+                );
+                if dry_run {
+                    return Response::done(true, detail);
+                }
+
+                if let Some(spec) = backend {
+                    if let Err(e) = self.services.register(port, spec) {
+                        return Response::error(e);
+                    }
+                }
+                match self.expose(port, &grantees).await {
+                    Ok(()) => Response::done(false, detail),
+                    Err(e) => Response::error(e),
                 }
             }
-            Request::Bind { port, local } => {
+
+            Request::Unexpose { port, to, dry_run } => {
+                let grantee = match to.as_deref().map(parse_key).transpose() {
+                    Ok(g) => g,
+                    Err(e) => return Response::error(e),
+                };
+                let detail = match grantee {
+                    Some(g) => format!("revoke {port} from {g}"),
+                    None => format!("revoke every grant for {port}"),
+                };
+                if dry_run {
+                    return Response::done(true, detail);
+                }
+                match self.unexpose(port, grantee).await {
+                    Ok(()) => Response::done(false, detail),
+                    Err(e) => Response::error(e),
+                }
+            }
+
+            Request::Bind {
+                port,
+                local,
+                dry_run,
+            } => {
+                let detail = match local {
+                    Some(0) => format!("bind peer port {port} on a free local port"),
+                    Some(l) => format!("bind peer port {port} on local port {l}"),
+                    None => format!("bind peer port {port} on {port} again"),
+                };
+                if dry_run {
+                    return Response::done(true, detail);
+                }
                 self.peers.set_bind(port, local).await;
-                Response::Ok
+                Response::done(false, detail)
             }
-            Request::Unexpose { port, to } => {
-                let grantee: Result<Option<EndpointId>> = to
-                    .map(|k| k.parse().context("invalid peer key"))
-                    .transpose();
-                match grantee {
-                    Ok(grantee) => match self.unexpose(port, grantee).await {
-                        Ok(()) => Response::Ok,
-                        Err(e) => Response::Error(e.to_string()),
-                    },
-                    Err(e) => Response::Error(e.to_string()),
+
+            Request::Pin {
+                key,
+                label,
+                dry_run,
+            } => {
+                match parse_key(&key) {
+                    Err(e) => return Response::error(e),
+                    Ok(id) if dry_run => {
+                        return Response::done(true, format!("pin {id} as \"{label}\""))
+                    }
+                    Ok(_) => {}
+                }
+                match self.peers.pin_peer(&key, &label) {
+                    Ok(()) => Response::done(false, format!("pinned {key} as \"{label}\"")),
+                    Err(e) => Response::error(e),
                 }
             }
-            Request::List => Response::List(self.list().await),
+
+            Request::List | Request::ListPeers | Request::ListPorts => {
+                Response::List(self.list().await)
+            }
             Request::Ticket => Response::Ticket(self.ticket()),
             Request::GrantToken { label } => Response::Token(self.tokens.mint(label)),
-            Request::Pin { key, label } => match self.peers.pin_peer(&key, &label) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e.to_string()),
-            },
         }
     }
 }
 
-/// Everything `iroh-gate daemon` was invoked with.
+/// Parse an endpoint id, classified so a typo exits 2 rather than 1.
+fn parse_key(key: &str) -> Result<EndpointId> {
+    key.parse()
+        .map_err(|e| Failure::new(ErrorKind::Invalid, format!("invalid peer key: {e}")).into())
+}
+
+/// Everything `ig daemon` was invoked with.
 pub struct Options {
     /// Fallback address for ports with no service declared
     pub host: IpAddr,
@@ -407,7 +501,7 @@ mod tests {
 
     #[test]
     fn key_persists_across_loads() {
-        let dir = std::env::temp_dir().join(format!("iroh-gate-key-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ig-key-test-{}", std::process::id()));
         let path = dir.join("key");
 
         let first = load_or_create_key(&path).unwrap();
@@ -426,7 +520,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_key_file() {
-        let dir = std::env::temp_dir().join(format!("iroh-gate-badkey-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ig-badkey-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("key");
         std::fs::write(&path, b"too short").unwrap();

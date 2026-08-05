@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn pins_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("iroh-gate-pins-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ig-pins-test-{}", std::process::id()));
         let pins = Pins::new(dir.join("peers.json"));
 
         assert!(pins.load().unwrap().is_empty());

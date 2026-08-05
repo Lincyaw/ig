@@ -21,9 +21,11 @@ pub const ALPN: &[u8] = b"PAI_SHO/1";
 pub enum Request {
     AddPeer {
         ticket: String,
+        dry_run: bool,
     },
     RemovePeer {
         ticket: String,
+        dry_run: bool,
     },
     /// Grant `port` to `to`; empty `to` grants to all currently known peers.
     /// `backend` declares what the port is served by; absent keeps whatever is
@@ -32,19 +34,27 @@ pub enum Request {
         port: u16,
         to: Vec<String>,
         backend: Option<BackendSpec>,
+        dry_run: bool,
     },
     /// Bind a peer's `port` to a different local port. `local` of None clears
     /// the override, and 0 asks the OS for any free port.
     Bind {
         port: u16,
         local: Option<u16>,
+        dry_run: bool,
     },
     /// Revoke grants for `port`; `to` limits it to one grantee
     Unexpose {
         port: u16,
         to: Option<String>,
+        dry_run: bool,
     },
+    /// Everything: peers, exposed ports, bindings
     List,
+    /// Peers only
+    ListPeers,
+    /// Exposed ports and their grants only
+    ListPorts,
     Ticket,
     GrantToken {
         label: String,
@@ -53,17 +63,106 @@ pub enum Request {
     Pin {
         key: String,
         label: String,
+        dry_run: bool,
     },
+}
+
+/// Why a request failed, in the terms a caller can act on.
+///
+/// This is what the client turns into an exit code. Without it every caller
+/// has to classify failures by grepping the message, which breaks the moment
+/// the wording changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// The request was malformed: an unparseable key, a bad backend spec
+    Invalid,
+    /// The thing named does not exist, or could not be reached
+    NotFound,
+    /// It already exists, or something else holds it
+    Conflict,
+    /// Refused on authorization grounds
+    Denied,
+    /// The daemon could not be reached at all
+    Unavailable,
+    /// Anything else
+    Internal,
+}
+
+impl ErrorKind {
+    /// Exit code for this failure. 0-9 are kept portable; see docs/CONTRACT.md.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            ErrorKind::Invalid => 2,
+            ErrorKind::NotFound => 3,
+            ErrorKind::Denied => 4,
+            ErrorKind::Conflict => 5,
+            ErrorKind::Unavailable => 7,
+            ErrorKind::Internal => 1,
+        }
+    }
+}
+
+/// An error carrying its kind, so the daemon classifies once and every caller
+/// agrees. Attached to `anyhow` chains and recovered by downcast.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct Failure {
+    pub kind: ErrorKind,
+    pub message: String,
+}
+
+impl Failure {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// The kind of an arbitrary error: whatever it was tagged with, or
+    /// Internal if it was never classified.
+    pub fn kind_of(err: &anyhow::Error) -> ErrorKind {
+        err.chain()
+            .find_map(|e| e.downcast_ref::<Failure>())
+            .map(|f| f.kind)
+            .unwrap_or(ErrorKind::Internal)
+    }
 }
 
 /// Response from daemon to CLI client
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Ok,
+    /// An action completed (or, with `dry_run`, would have). `detail` is a
+    /// one-line human summary; it is not a stable field to parse.
+    Done {
+        dry_run: bool,
+        detail: String,
+    },
     Ticket(String),
     List(ListInfo),
     Token(String),
-    Error(String),
+    Error {
+        kind: ErrorKind,
+        message: String,
+    },
+}
+
+impl Response {
+    /// An action that ran (or would have, under `dry_run`).
+    pub fn done(dry_run: bool, detail: impl Into<String>) -> Self {
+        Response::Done {
+            dry_run,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn error(err: anyhow::Error) -> Self {
+        Response::Error {
+            kind: Failure::kind_of(&err),
+            message: format!("{err:#}"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
