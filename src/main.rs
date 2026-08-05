@@ -14,7 +14,7 @@ mod tunnel;
 #[derive(Parser)]
 #[clap(
     name = "iroh-gate",
-    about = "What happens when you want dumbpipe to stay running, handle a few ports at once, and reconnect when your laptop wakes up",
+    about = "Reach a machine's internal network from outside it",
     version
 )]
 struct Cli {
@@ -59,7 +59,7 @@ pub enum Command {
         services: Vec<std::path::PathBuf>,
     },
 
-    /// Add a peer (returns assigned IP)
+    /// Add a peer and connect to it
     AddPeer {
         /// Peer's ticket (endpoint ID)
         ticket: String,
