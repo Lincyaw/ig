@@ -1,0 +1,45 @@
+[package]
+name = "iroh-gate"
+version = "0.1.0"
+edition = "2021"
+description = "Reach a machine's internal network from outside it. Encrypted peer-to-peer port forwarding, with an exposed port backed by a reverse proxy, a tcp forward, or a unix socket. Default deny -- every port granted to exactly the peer you choose."
+license = "MIT"
+
+
+[dependencies]
+# Networking
+iroh = "0.97"
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrent collections
+dashmap = "6"
+
+# HTTP gateway (reverse proxy served over a tunnel)
+pingora-core = { version = "0.8.1", features = ["rustls"] }
+pingora-proxy = { version = "0.8.1", features = ["rustls"] }
+pingora-http = "0.8.1"
+http = "1"
+async-trait = "0.1"
+toml = "1"
+
+# Misc
+rand = "0.9"
+
+[profile.release]
+lto = true
+strip = true
