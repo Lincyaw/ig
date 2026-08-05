@@ -1797,6 +1797,7 @@ dependencies = [
  "dashmap",
  "http",
  "iroh",
+ "libc",
  "pingora-core",
  "pingora-http",
  "pingora-proxy",

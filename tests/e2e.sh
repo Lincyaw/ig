@@ -199,6 +199,14 @@ if [[ -z "$OUT" ]]; then
 else
   echo "  FAIL  an action writes nothing to stdout"; echo "        got: $OUT"; fail=$((fail+1))
 fi
+# Output longer than a pipe buffer, read by something that stops early. Rust
+# ignores SIGPIPE by default, which turns this into a panic and exit 101.
+$BIN completion bash 2>pipe.err | head -1 >/dev/null
+if [[ -s pipe.err ]]; then
+  echo "  FAIL  a closed stdout is not an error"; echo "        got: $(head -1 pipe.err)"; fail=$((fail+1))
+else
+  echo "  PASS  a closed stdout is not an error"; pass=$((pass+1))
+fi
 
 echo
 echo "== unexpose retires the service, however it is spelled =="

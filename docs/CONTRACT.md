@@ -20,6 +20,9 @@ Diffing it between releases is the cheapest way to catch a breaking change.
   removes an error.
 - Colour is emitted only when stderr is a terminal. Piping the daemon's logs to
   a file yields plain text.
+- A reader that closes stdout early (`ig completion bash | head -1`) ends the
+  process on `SIGPIPE`, as any other Unix tool would: exit `141`, nothing on
+  stderr. It is not an application error, and does not use the table below.
 
 ## Exit codes
 

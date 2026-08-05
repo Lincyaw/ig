@@ -253,8 +253,21 @@ fn read_token(path: &std::path::Path) -> Result<String> {
     Ok(token.trim().to_string())
 }
 
+/// Die quietly when the reader of stdout goes away, as every other Unix tool
+/// does. Rust ignores SIGPIPE so that a write returns `EPIPE` instead, which
+/// surfaces as a panic and exit 101 -- `ig completion bash | head` should not
+/// print a backtrace.
+fn restore_sigpipe() {
+    // Safety: installing the default disposition for one signal, before any
+    // thread has been spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    restore_sigpipe();
     let cli = Cli::parse();
 
     // The exit code is the contract; see docs/CONTRACT.md.
