@@ -52,7 +52,7 @@ contract. `IG_FORMAT=json` sets it for a whole session.
 |---------|---------------------------|
 | `id` | `{"id": "<64 hex>"}` |
 | `peer token --label L` | `{"token": "<hex>"}` |
-| `status` | `{"id", "peers", "exposed", "grants", "bindings"}` |
+| `status` | `{"id", "peers", "exposed", "grants", "bindings", "remaps"}` |
 | `peer ls` | `{"peers": [...]}` |
 | `port ls` | `{"exposed": [...], "grants": [...]}` |
 | `autostart status` | `{"supervisor", "unit", "installed", "running"}` |
@@ -73,8 +73,12 @@ Object shapes:
 // grants[]   -- one row per (port, grantee)
 {"port": 5432, "to": "<64 hex>"}
 
-// bindings[] -- `local` differs from `port` when remapped by `port bind`
+// bindings[] -- live listeners; `local` differs from `port` when remapped
 {"port": 5432, "local": 5433, "peer": "<64 hex>"}
+
+// remaps[]   -- rules set by `port bind`, listed whether or not a peer is
+//               currently offering the port, so a bind can be confirmed
+{"port": 5432, "local": 5433}
 ```
 
 `error.kind` is one of `invalid`, `not_found`, `conflict`, `denied`,
@@ -113,6 +117,13 @@ The daemon's secret key lives at `$XDG_STATE_HOME/ig/key`, falling back to
 `~/.local/state/ig/key`. Override with `--key`. Pins are stored beside it as
 `<key>.peers.json`. The key is 0600 and a state directory created by `ig` is
 0700; a directory that already exists is left alone.
+
+Grants, declared backends, and `port bind` remaps are written to
+`<key>.state.json` (0600, replaced atomically) and restored at startup, so what
+you declare over the control socket survives a restart. Declarations passed to
+`ig daemon` -- `-e`, `--service`, `--bind` -- are an overlay applied on top for
+that run and are *not* written there: a `--service` file wins over a stored
+backend for the same port, and dropping `-e` from a unit drops the grant.
 
 The control socket is bound 0600: reaching it is enough to expose a port or mint
 an enrollment token. `ig daemon` exits 5 rather than displacing a daemon already

@@ -14,6 +14,7 @@ mod peer;
 mod protocol;
 mod schema;
 mod service;
+mod state;
 mod tunnel;
 mod upgrade;
 

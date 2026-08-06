@@ -175,6 +175,20 @@ pub struct ListInfo {
     /// Who each port is granted to, one row per (port, grantee)
     pub grants: Vec<GrantInfo>,
     pub bindings: Vec<BindingInfo>,
+    /// Remaps declared by `port bind`, whether or not a peer is currently
+    /// offering the port. A rule with no live listener is invisible in
+    /// `bindings`, which made a `bind` against an offline peer impossible to
+    /// confirm.
+    #[serde(default)]
+    pub remaps: Vec<RemapInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemapInfo {
+    /// The port as a peer announces it
+    pub port: u16,
+    /// Where it is told to land here
+    pub local: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

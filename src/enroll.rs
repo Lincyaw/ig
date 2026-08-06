@@ -97,14 +97,10 @@ impl Pins {
         self.save(&pins)
     }
 
+    /// Atomic and 0600, via the shared writer: a pin is an authorization, and a
+    /// half-written pin file is a daemon that no longer trusts anyone.
     fn save(&self, pins: &[Pin]) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        let data = serde_json::to_vec_pretty(pins)?;
-        std::fs::write(&self.path, data)
-            .with_context(|| format!("failed to write {}", self.path.display()))
+        crate::state::write_json(&self.path, &pins)
     }
 }
 

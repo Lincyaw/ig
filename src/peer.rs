@@ -482,6 +482,16 @@ impl PeerManager {
         }
     }
 
+    /// Every remap, for persisting. Not the ports themselves -- those are the
+    /// peer's to announce -- only the decision this side made about where they
+    /// land, which is the part that would otherwise be lost on restart.
+    pub fn binds_snapshot(&self) -> std::collections::BTreeMap<u16, u16> {
+        self.binds
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
+    }
+
     /// The local port an announced port binds on, before the OS gets a say.
     fn local_for(&self, port: u16) -> u16 {
         self.binds.get(&port).map(|e| *e.value()).unwrap_or(port)

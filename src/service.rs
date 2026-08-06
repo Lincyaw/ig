@@ -24,7 +24,7 @@
 //! satisfying its supertraits, so an iroh stream only has to implement those to
 //! be accepted everywhere a TCP socket would be.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -71,8 +71,9 @@ macro_rules! invalid {
 // ============================================================================
 
 /// What a port is backed by. Travels over the control socket, so `expose` can
-/// declare a backend at runtime exactly as the startup file does at boot.
-#[derive(Debug, Serialize, Deserialize)]
+/// declare a backend at runtime exactly as the startup file does at boot, and
+/// is kept beside the built backend so it can be persisted and replayed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum BackendSpec {
     /// Reverse proxy. Routes are tried in order; the first match wins.
@@ -179,7 +180,7 @@ pub fn load_service_file(path: &Path) -> Result<Vec<(u16, BackendSpec)>> {
         .collect())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Route {
     /// Match the request's Host header (hostname only, port ignored).
     /// Absent matches any host.
@@ -286,8 +287,16 @@ fn plural_routes(n: usize) -> String {
 /// Mutable at runtime, because everything else about an exposed port is: a port
 /// is granted and revoked live over the control socket, and a backend that
 /// needed a daemon restart would be the one static thing in a dynamic system.
+/// A declaration and what was built from it. The spec is kept because a built
+/// backend cannot be turned back into one -- the http arm moves its routes into
+/// the proxy -- and without it a restart could not replay what it was told.
+struct Declared {
+    spec: Arc<BackendSpec>,
+    backend: Backend,
+}
+
 pub struct Services {
-    backends: std::sync::RwLock<HashMap<u16, Backend>>,
+    backends: std::sync::RwLock<HashMap<u16, Declared>>,
     /// Where a port with no declared backend forwards to. Modelled as a
     /// fallback backend rather than a branch at the call site, so every port is
     /// served by exactly one mechanism.
@@ -333,10 +342,27 @@ impl Services {
     /// Declare what `port` is backed by, replacing any previous declaration.
     /// Re-exposing a port with a new backend is a redirect, not an error.
     pub fn register(&self, port: u16, spec: BackendSpec) -> Result<()> {
-        let backend = self.build(port, spec)?;
+        let backend = self.build(port, spec.clone())?;
         info!("service on port {} ({})", port, backend.describe());
-        self.backends.write().unwrap().insert(port, backend);
+        self.backends.write().unwrap().insert(
+            port,
+            Declared {
+                spec: Arc::new(spec),
+                backend,
+            },
+        );
         Ok(())
+    }
+
+    /// Every declaration, for persisting. Only ports something was declared
+    /// for: a port on the default forward has nothing to record.
+    pub fn snapshot(&self) -> BTreeMap<u16, BackendSpec> {
+        self.backends
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(port, declared)| (*port, (*declared.spec).clone()))
+            .collect()
     }
 
     /// Same, but refuse to overwrite. Used when applying the startup file, where
@@ -371,7 +397,7 @@ impl Services {
             .read()
             .unwrap()
             .get(&port)
-            .cloned()
+            .map(|declared| declared.backend.clone())
             .unwrap_or_else(|| Backend::Tcp(SocketAddr::new(self.host, port).to_string()))
     }
 
@@ -380,7 +406,7 @@ impl Services {
     /// because "nothing was declared here" is what a reader wants to know.
     pub fn describe(&self, port: u16) -> String {
         match self.backends.read().unwrap().get(&port) {
-            Some(backend) => backend.describe(),
+            Some(declared) => declared.backend.describe(),
             None => format!("default {}:{}", self.host, port),
         }
     }

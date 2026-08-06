@@ -205,9 +205,17 @@ ig port expose 8080 --routes internal-sites.toml  # a reverse proxy
 ig port expose 3002                               # no backend: --host:3002
 ```
 
-Declared live, like every other grant -- no restart. `--service <file>` makes the
-same declarations at startup, in the `[[service]]` form shown in the example
-above.
+Declared live, like every other grant -- no restart. What you declare over the
+control socket is written to `<key>.state.json` and restored when the daemon
+starts, so a reboot does not quietly empty a machine that `ig status` showed as
+serving four ports a moment earlier.
+
+`--service <file>` makes the same declarations at startup, in the `[[service]]`
+form shown in the example above. Startup declarations are an overlay rather than
+a recording: `--service` wins over a stored backend for the same port, because
+it is the file you just edited, and a port granted with `-e` goes away when you
+remove `-e` -- otherwise a unit file would be something you could not edit your
+way out of.
 
 ### Route tables
 

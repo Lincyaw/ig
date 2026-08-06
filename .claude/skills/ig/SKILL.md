@@ -128,6 +128,14 @@ release's `SHA256SUMS`. It does not restart anything -- a running daemon keeps
 executing the old code until `ig autostart restart`. On a private repository it
 needs `GH_TOKEN`/`GITHUB_TOKEN` or a logged-in `gh`.
 
+What you declare over the control socket -- grants, backends, `port bind`
+remaps -- is written to `<key>.state.json` and restored on startup, so do not
+bake it into the unit to survive reboots. Declarations passed to `ig daemon`
+work the other way round: they are an overlay for that run and are not recorded,
+so a `--service` file wins over a stored backend for the same port, and dropping
+`-e` from a unit drops that grant. Use the unit for what should be true every
+boot, and `ig port expose` for what you are deciding now.
+
 ## Checking that it worked
 
 `ig status` on either side. Read it from the inside to confirm the grant landed,

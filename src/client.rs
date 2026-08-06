@@ -226,6 +226,7 @@ fn json_view(info: &ListInfo, view: ListView) -> serde_json::Value {
             "exposed": info.i_expose,
             "grants": info.grants,
             "bindings": info.bindings,
+            "remaps": info.remaps,
         }),
     }
 }
@@ -299,6 +300,21 @@ fn text_view(info: &ListInfo, view: ListView) -> String {
                 format!("127.0.0.1:{} (remapped from {})", b.local, b.port)
             };
             out.push_str(&format!("  {:<38}  from {}\n", landed, short(&b.peer)));
+        }
+
+        // A remap nobody is currently offering has no listener to show under
+        // bindings, so say it here rather than leaving the user unable to tell
+        // whether their `port bind` landed.
+        let idle: Vec<&crate::protocol::RemapInfo> = info
+            .remaps
+            .iter()
+            .filter(|r| !info.bindings.iter().any(|b| b.port == r.port))
+            .collect();
+        if !idle.is_empty() {
+            out.push_str("\nremaps (waiting for a peer to offer the port)\n");
+            for r in idle {
+                out.push_str(&format!("  {:<6}  -> 127.0.0.1:{}\n", r.port, r.local));
+            }
         }
     }
 

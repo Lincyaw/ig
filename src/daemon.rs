@@ -4,9 +4,10 @@ use crate::enroll::{Pins, Tokens};
 use crate::grants::Grants;
 use crate::peer::PeerManager;
 use crate::protocol::{
-    ErrorKind, ExposedInfo, Failure, GrantInfo, ListInfo, Request, Response, ALPN,
+    ErrorKind, ExposedInfo, Failure, GrantInfo, ListInfo, RemapInfo, Request, Response, ALPN,
 };
 use crate::service::Services;
+use crate::state::{State, Store};
 use anyhow::{anyhow, Context, Result};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use std::collections::BTreeSet;
@@ -30,6 +31,8 @@ pub struct Daemon {
     tokens: Arc<Tokens>,
     /// What every service registers against, and what `list` describes from
     services: Arc<Services>,
+    /// Where grants, backends, and binds are written so a restart keeps them
+    store: Store,
 }
 
 /// Default key location: $XDG_STATE_HOME/ig/key (~/.local/state/ig/key)
@@ -182,6 +185,7 @@ impl Daemon {
             grants,
             tokens,
             services,
+            store: Store::new(key_path),
         });
 
         for pin in pinned {
@@ -196,6 +200,59 @@ impl Daemon {
     pub fn ticket(&self) -> String {
         // TODO: proper ticket serialization
         self.endpoint.id().to_string()
+    }
+
+    /// Everything a restart would otherwise forget.
+    async fn snapshot(&self) -> State {
+        State {
+            version: 0, // stamped by the store
+            grants: self
+                .grants
+                .read()
+                .await
+                .all()
+                .into_iter()
+                .map(|(port, to)| (port, to.to_string()))
+                .collect(),
+            services: self.services.snapshot(),
+            binds: self.peers.binds_snapshot(),
+        }
+    }
+
+    /// Write the current declarations out.
+    ///
+    /// Called from the control socket only. A failure is returned rather than
+    /// logged: the change did take effect in memory, but reporting success for
+    /// something that will vanish at the next restart is precisely the bug this
+    /// file exists to close.
+    async fn persist(&self) -> Result<()> {
+        self.store.save(&self.snapshot().await)
+    }
+
+    /// Restore what a previous run was told. Applied before any startup
+    /// declaration, so `--service` and `-e` remain an overlay for this run.
+    async fn restore(&self, state: State) -> Result<()> {
+        for (port, spec) in state.services {
+            // A --service file already claimed this port: it is what the
+            // operator just edited, so it wins over what an earlier run
+            // happened to be told.
+            if !self.services.contains(port) {
+                self.services.register(port, spec)?;
+            }
+        }
+        {
+            let mut grants = self.grants.write().await;
+            for (port, key) in &state.grants {
+                match parse_key(key) {
+                    Ok(id) => grants.add(*port, id),
+                    Err(e) => warn!("dropping unreadable grant for port {port}: {e}"),
+                }
+            }
+        }
+        for (port, local) in state.binds {
+            self.peers.set_bind(port, Some(local)).await;
+        }
+        Ok(())
     }
 
     /// Grant `port` to each peer in `to` and re-announce
@@ -254,6 +311,12 @@ impl Daemon {
                 })
                 .collect(),
             bindings: self.peers.list_bindings().await,
+            remaps: self
+                .peers
+                .binds_snapshot()
+                .into_iter()
+                .map(|(port, local)| RemapInfo { port, local })
+                .collect(),
         }
     }
 
@@ -313,7 +376,12 @@ impl Daemon {
                     Ok(_) => {}
                 }
                 match self.peers.remove_peer(&ticket).await {
-                    Ok(()) => Response::done(false, format!("removed peer {ticket}")),
+                    // remove_peer revokes that peer's grants, so the file has
+                    // to follow or a restart would hand them back.
+                    Ok(()) => match self.persist().await {
+                        Ok(()) => Response::done(false, format!("removed peer {ticket}")),
+                        Err(e) => Response::error(e),
+                    },
                     Err(e) => Response::error(e),
                 }
             }
@@ -370,7 +438,10 @@ impl Daemon {
                     }
                 }
                 match self.expose(port, &grantees).await {
-                    Ok(()) => Response::done(false, detail),
+                    Ok(()) => match self.persist().await {
+                        Ok(()) => Response::done(false, detail),
+                        Err(e) => Response::error(e),
+                    },
                     Err(e) => Response::error(e),
                 }
             }
@@ -388,7 +459,10 @@ impl Daemon {
                     return Response::done(true, detail);
                 }
                 match self.unexpose(port, grantee).await {
-                    Ok(()) => Response::done(false, detail),
+                    Ok(()) => match self.persist().await {
+                        Ok(()) => Response::done(false, detail),
+                        Err(e) => Response::error(e),
+                    },
                     Err(e) => Response::error(e),
                 }
             }
@@ -407,7 +481,10 @@ impl Daemon {
                     return Response::done(true, detail);
                 }
                 self.peers.set_bind(port, local).await;
-                Response::done(false, detail)
+                match self.persist().await {
+                    Ok(()) => Response::done(false, detail),
+                    Err(e) => Response::error(e),
+                }
             }
 
             Request::Pin {
@@ -483,8 +560,6 @@ pub async fn run(socket_path: &Path, opts: Options) -> Result<()> {
                 .with_context(|| format!("in service config {}", path.display()))?;
         }
     }
-    let service_ports = services.ports();
-
     // Claimed before anything else runs. The socket is the only thing making
     // two daemons on one path mutually exclusive, so binding it first is what
     // keeps the window between "is anyone there" and "I am now there" from
@@ -493,11 +568,30 @@ pub async fn run(socket_path: &Path, opts: Options) -> Result<()> {
     let listener = bind_control_socket(socket_path)?;
 
     let key_path = key_path.unwrap_or_else(default_key_path);
+    // Read before the endpoint is built, so a file this build cannot understand
+    // stops the daemon rather than being half-applied and written back.
+    let restored = Store::new(&key_path).load()?;
     let daemon = Daemon::new(&key_path, services).await?;
+
+    // What a previous run was told, then this run's declarations over the top.
+    // A --service file already applied above keeps its port; everything else
+    // comes back exactly as it was left.
+    if !restored.is_empty() {
+        info!(
+            "restored {} grant(s), {} service(s), {} bind(s)",
+            restored.grants.len(),
+            restored.services.len(),
+            restored.binds.len()
+        );
+        daemon.restore(restored).await?;
+    }
 
     for (remote, local) in binds {
         daemon.peers.set_bind(remote, Some(local)).await;
     }
+
+    // After restore, so a service that came back from the file is granted too.
+    let service_ports = daemon.services.ports();
 
     println!("Ticket: {}", daemon.ticket());
     info!("daemon started, host={}, key={}", host, key_path.display());

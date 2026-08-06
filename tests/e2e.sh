@@ -223,6 +223,55 @@ check "and says why"                        "already listening"   "$(cat dup.log
 check "the first one is untouched"          "$TICKET_A"           "$(a id)"
 
 echo
+echo "== what the control socket was told outlives the process =="
+# A restart used to drop every grant, backend, and remap in silence, while
+# `status` had shown them a moment earlier.
+c() { $BIN --socket "$WORK/c.sock" "$@"; }
+c_start() {
+  $BIN --socket "$WORK/c.sock" daemon --key "$WORK/c.key" "$@" >>c.log 2>&1 &
+  DAEMON_PIDS+=($!)
+  for _ in $(seq 60); do c id >/dev/null 2>&1 && return; sleep 0.25; done
+}
+c_stop() {
+  for p in $(pgrep -x ig); do
+    tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q "$WORK/c.key" && kill "$p"
+  done
+  sleep 2
+}
+c_start
+c peer pin "$TICKET_B" --label b >/dev/null
+c port expose 17001 --to "$TICKET_B" --upstream kept.internal:1 >/dev/null
+c port expose 17002 --to "$TICKET_B" >/dev/null
+c port unexpose 17002 >/dev/null
+c port bind 17003 --local 17004 >/dev/null
+c_stop; c_start
+
+R=$(c port ls --format json)
+check "a granted port comes back"            "\"port\": 17001"            "$R"
+check "with the backend it was given"        "tcp kept.internal:1"        "$R"
+check "a revoke comes back too"              ""                           "$(echo "$R" | grep 17002)"
+check "and so does a remap"                  "\"local\": 17004"           "$(c status --format json)"
+
+# A --service file is what the operator just edited, so it has to win over
+# whatever an earlier run happened to be told about the same port.
+cat > over.toml <<EOF
+[[service]]
+kind = "tcp"
+port = 17001
+upstream = "from-file:1"
+EOF
+c_stop; c_start --service "$WORK/over.toml"
+check "an edited service file still wins"    "tcp from-file:1"            "$(c port ls --format json)"
+
+# And a startup flag stays an overlay: if -e stuck, removing it from a unit
+# would leave the port exposed with no way to edit your way out.
+c_stop; c_start -a "$TICKET_B" -e 17009
+check "a startup -e applies for that run"    "\"port\": 17009"            "$(c port ls --format json)"
+c_stop; c_start
+check "but does not persist itself"          ""                           "$(c port ls --format json | grep 17009)"
+c_stop
+
+echo
 echo "== autostart renders a unit without touching the system =="
 # `upgrade` is deliberately not exercised here: it needs GitHub and a token,
 # which would make this suite fail for reasons that are not about ig.
