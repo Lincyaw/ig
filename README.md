@@ -73,7 +73,18 @@ connection restores on its own.
 
 ## Install
 
-Not published anywhere. Build it:
+Tagging `v*` builds Linux x86_64 and macOS (both architectures) and attaches
+them to a GitHub release, with a `.sha256` beside each. The repository is
+private, so downloading one needs an authenticated `gh`:
+
+```sh
+gh release download --repo Lincyaw/ig --pattern '*aarch64-apple-darwin*'
+```
+
+There is no Windows build: the control socket is AF_UNIX, unix sockets are a
+backend kind, and SIGPIPE is handled through libc.
+
+Otherwise build it:
 
 ```sh
 cargo build --release    # target/release/ig

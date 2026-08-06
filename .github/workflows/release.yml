@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Exercises the whole build matrix without cutting a release, so a broken
+  # runner image is found before tag day rather than on it. The publish job
+  # below is tag-only, so a manual run just leaves artifacts behind.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners only, no cross-compiling. aws-lc-sys arrives through
+          # iroh -> hickory -> rustls and builds through cmake and a C compiler;
+          # cross-compiling that is a reliable way to lose a release.
+          #
+          # No Windows target: the control socket is AF_UNIX, unix sockets are a
+          # backend kind, and SIGPIPE is restored through libc.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04 # older glibc than ubuntu-latest, so the binary
+                             # runs on distros the runner has moved past
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Publishing a tag whose binary reports a different --version is the kind
+      # of mistake that is only noticed much later, so fail before building.
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          tag=${GITHUB_REF_NAME#v}
+          if [[ "$crate" != "$tag" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+
+      # --locked so the release is built from the committed Cargo.lock rather
+      # than whatever resolves that morning.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          name="ig-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name/docs"
+          cp "target/${{ matrix.target }}/release/ig" "dist/$name/"
+          cp README.md "dist/$name/"
+          cp docs/CONTRACT.md "dist/$name/docs/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # shasum rather than sha256sum: present on both runner images.
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      # needs: build means a failed target publishes nothing, rather than a
+      # release that is quietly missing a platform.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # --generate-notes reads the history since the last tag
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.tar.gz dist/*.sha256

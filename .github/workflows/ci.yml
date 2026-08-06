@@ -11,35 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-      
+          components: clippy, rustfmt
+
+      # Keyed on the toolchain as well as Cargo.lock, and cleaned before saving.
+      # The hand-rolled entries this replaces were keyed on Cargo.lock alone with
+      # no restore-keys, and actions/cache never overwrites an existing key: the
+      # target dir was written once and then frozen, while a lock bump threw the
+      # whole thing away and paid for a cold build.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
       - name: Build
         run: cargo build --verbose
-      
+
       - name: Run tests
         run: cargo test --verbose
-      
+
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
