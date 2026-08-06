@@ -19,9 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners only, no cross-compiling. aws-lc-sys arrives through
-          # iroh -> hickory -> rustls and builds through cmake and a C compiler;
-          # cross-compiling that is a reliable way to lose a release.
+          # aws-lc-sys arrives through iroh -> hickory -> rustls and builds
+          # through cmake and a C compiler, so each target is built by a host
+          # that can drive that toolchain natively. The one exception is the
+          # Intel Mac, below.
           #
           # No Windows target: the control socket is AF_UNIX, unix sockets are a
           # backend kind, and SIGPIPE is restored through libc.
@@ -30,8 +31,14 @@ jobs:
                              # runs on distros the runner has moved past
           - target: aarch64-apple-darwin
             os: macos-14
+          # Built on the arm64 Mac rather than a macos-13 runner, which no
+          # longer picks up jobs. Staying inside Apple's own toolchain keeps
+          # this tractable -- one SDK targets both slices -- but cmake has to be
+          # told, or aws-lc-sys quietly builds an arm64 archive and the link
+          # fails.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
+            cmake_arch: x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +67,28 @@ jobs:
       # --locked so the release is built from the committed Cargo.lock rather
       # than whatever resolves that morning.
       - name: Build
+        env:
+          CMAKE_OSX_ARCHITECTURES: ${{ matrix.cmake_arch }}
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # A cross-built binary that silently came out as the host's architecture
+      # would package, publish, and then refuse to launch, so assert it rather
+      # than trusting the target flag reached every part of the build.
+      - name: Check the binary's architecture
+        shell: bash
+        run: |
+          out=$(file "target/${{ matrix.target }}/release/ig")
+          echo "$out"
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin)      want="x86_64" ;;
+            aarch64-apple-darwin)     want="arm64" ;;
+            x86_64-unknown-linux-gnu) want="x86-64" ;;
+            *) echo "no architecture expectation for ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          if ! grep -q "$want" <<<"$out"; then
+            echo "expected $want in the above" >&2
+            exit 1
+          fi
 
       - name: Package
         shell: bash
