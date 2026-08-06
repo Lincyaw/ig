@@ -73,13 +73,16 @@ connection restores on its own.
 
 ## Install
 
-Tagging `v*` builds Linux x86_64 and macOS (both architectures) and attaches
-them to a GitHub release, with a `.sha256` beside each. The repository is
-private, so downloading one needs an authenticated `gh`:
+Tagging `v*` attaches one binary per platform to a GitHub release. The
+repository is private, so fetching one needs an authenticated `gh`:
 
 ```sh
-gh release download --repo Lincyaw/ig --pattern '*aarch64-apple-darwin*'
+gh release download --repo Lincyaw/ig -p ig-aarch64-apple-darwin -O ig
+chmod +x ig
 ```
+
+Pick `ig-aarch64-apple-darwin` (Apple Silicon), `ig-x86_64-apple-darwin`
+(Intel Mac), or `ig-x86_64-unknown-linux-gnu`. `SHA256SUMS` covers all three.
 
 There is no Windows build: the control socket is AF_UNIX, unix sockets are a
 backend kind, and SIGPIPE is handled through libc.

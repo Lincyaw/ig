@@ -90,24 +90,20 @@ jobs:
             exit 1
           fi
 
-      - name: Package
+      # The asset is the binary itself. An archive would save about 13 MB and
+      # carry the executable bit, but it costs everyone an extract step to hand
+      # back a `chmod +x`, and the docs it would bundle already live in the
+      # repository.
+      - name: Stage the binary
         shell: bash
         run: |
-          name="ig-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name/docs"
-          cp "target/${{ matrix.target }}/release/ig" "dist/$name/"
-          cp README.md "dist/$name/"
-          cp docs/CONTRACT.md "dist/$name/docs/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          # shasum rather than sha256sum: present on both runner images.
-          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/ig" "dist/ig-${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
+          name: ig-${{ matrix.target }}
+          path: dist/ig-${{ matrix.target }}
           if-no-files-found: error
 
   publish:
@@ -126,6 +122,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # One SHA256SUMS covering the release, rather than a sidecar per binary:
+      # `shasum -c SHA256SUMS` then checks whatever you happened to download.
+      - name: Checksums
+        run: |
+          cd dist
+          shasum -a 256 ig-* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -133,4 +137,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            dist/*.tar.gz dist/*.sha256
+            dist/ig-* dist/SHA256SUMS
