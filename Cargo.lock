@@ -1802,6 +1802,8 @@ dependencies = [
  "pingora-http",
  "pingora-proxy",
  "rand 0.9.2",
+ "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

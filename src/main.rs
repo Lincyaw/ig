@@ -5,6 +5,7 @@ use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+mod autostart;
 mod client;
 mod daemon;
 mod enroll;
@@ -14,6 +15,7 @@ mod protocol;
 mod schema;
 mod service;
 mod tunnel;
+mod upgrade;
 
 /// How results are written to stdout.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
@@ -94,12 +96,58 @@ pub enum Command {
         cmd: PortCmd,
     },
 
+    /// Autostart: keep the daemon running under systemd or launchd
+    Autostart {
+        #[command(subcommand)]
+        cmd: AutostartCmd,
+    },
+
+    /// Replace this binary with the latest release
+    Upgrade {
+        /// Report what is available, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Print a shell completion script
     Completion {
         /// Shell to generate for
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+pub enum AutostartCmd {
+    /// Write the unit for this platform, then start it and enable it at login.
+    /// Everything after `--` is passed to `ig daemon`.
+    Install {
+        /// Arguments for the supervised `ig daemon`, after `--`
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "DAEMON_ARGS"
+        )]
+        args: Vec<String>,
+        /// Print the unit that would be written, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Stop it, disable it, and delete the unit
+    Uninstall {
+        /// Report what would change, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Restart the supervised daemon, to pick up an upgrade or a changed
+    /// --service file
+    Restart {
+        /// Report what would change, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Where the unit is, and whether it is running
+    Status,
 }
 
 #[derive(Parser)]
@@ -320,6 +368,18 @@ async fn run(cli: Cli) -> Result<i32> {
             .await?;
             Ok(0)
         }
+        // Neither of these talks to the daemon: one drives the platform's
+        // supervisor, the other drives GitHub.
+        Command::Autostart { cmd } => match cmd {
+            AutostartCmd::Install { args, dry_run } => {
+                autostart::install(&cli.socket, args, dry_run, cli.format)
+            }
+            AutostartCmd::Uninstall { dry_run } => autostart::uninstall(dry_run, cli.format),
+            AutostartCmd::Restart { dry_run } => autostart::restart(dry_run, cli.format),
+            AutostartCmd::Status => autostart::status(cli.format),
+        },
+        Command::Upgrade { dry_run } => upgrade::run(dry_run, cli.format).await,
+
         other => client::run(&cli.socket, other, cli.format, cli.quiet).await,
     }
 }

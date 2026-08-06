@@ -223,6 +223,21 @@ check "and says why"                        "already listening"   "$(cat dup.log
 check "the first one is untouched"          "$TICKET_A"           "$(a id)"
 
 echo
+echo "== autostart renders a unit without touching the system =="
+# `upgrade` is deliberately not exercised here: it needs GitHub and a token,
+# which would make this suite fail for reasons that are not about ig.
+BEFORE_UNIT=$($BIN autostart status --format json)
+U=$($BIN --socket "$WORK/a.sock" autostart install --dry-run -- --key /tmp/x.key 2>&1)
+check "the unit runs this binary"           "$BIN"                "$U"
+check "with the socket spelled out"         "$WORK/a.sock"        "$U"
+check "and the passed-through args"         "--key /tmp/x.key"    "$U"
+if [[ "$BEFORE_UNIT" == "$($BIN autostart status --format json)" ]]; then
+  echo "  PASS  --dry-run installed nothing"; pass=$((pass+1))
+else
+  echo "  FAIL  --dry-run installed nothing"; fail=$((fail+1))
+fi
+
+echo
 echo "== unexpose retires the service, however it is spelled =="
 # Revoking the one remaining grantee by name reaches the same state as revoking
 # them all, so it has to land the same way.

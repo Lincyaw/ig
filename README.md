@@ -93,14 +93,32 @@ Otherwise build it:
 cargo build --release    # target/release/ig
 ```
 
+Once installed, `ig upgrade` replaces the binary with the latest release. It
+fetches the asset built for the triple this binary was compiled for, checks it
+against the release's own `SHA256SUMS`, and swaps it in with a rename, so an
+interrupted upgrade leaves the old binary rather than half a new one.
+`--dry-run` reports what is available and touches nothing.
+
 ## Running it in the background
 
-`ig daemon` stays in the foreground and does not daemonize itself, which is what
-every process supervisor wants: systemd and launchd both track the process they
-started rather than chasing a fork. `contrib/` has a unit for each --
-`ig.service` and `com.github.lincyaw.ig.plist` -- and both restart the daemon if
-it dies. Ad hoc, `setsid nohup ig daemon >/tmp/ig.log 2>&1 &` detaches it from
-the terminal.
+```sh
+ig autostart install -- --service ~/.config/ig/services.toml
+```
+
+That writes a unit for whatever supervises processes here -- a systemd user
+unit on Linux, a LaunchAgent on macOS -- points it at this exact binary, starts
+it, and enables it at login. Everything after `--` is handed to `ig daemon`.
+`ig autostart status` says where the unit is and whether it is running,
+`restart` picks up an upgrade or an edited `--service` file, and `uninstall`
+takes it all back out. To read the unit before committing to it, add
+`--dry-run`: it prints exactly what would be written.
+
+`ig daemon` itself stays in the foreground and never forks. That is what makes
+the above work: systemd and launchd own the process they started, and a tool
+that daemonizes itself leaves them guessing at a pidfile, trading away the
+restart-after-crash that was the reason to use them. Ad hoc,
+`setsid nohup ig daemon >/tmp/ig.log 2>&1 &` is enough to detach from a
+terminal, with nothing watching it.
 
 Starting a second daemon on a socket another one holds is refused (exit 5)
 rather than granted. Unlinking a live socket would not stop the daemon behind
@@ -137,6 +155,12 @@ ig port unexpose <port> [--to <key>]         Revoke grants
 ig port ls                                   Exposed ports and what serves each
 ig port bind <port> --local <p>              Land a peer's port elsewhere
 
+ig autostart install [-- <daemon args>]      Supervise the daemon here
+ig autostart uninstall                       Stop it and remove the unit
+ig autostart restart                         Pick up an upgrade or a config edit
+ig autostart status                          Where the unit is, and its state
+
+ig upgrade                       Replace this binary with the latest release
 ig completion <shell>            Print a shell completion script
 ```
 

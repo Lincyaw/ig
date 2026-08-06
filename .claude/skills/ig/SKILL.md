@@ -106,6 +106,28 @@ minutes; and they are only claimable at `ig daemon` startup, not by
 `ig peer add`. Prefer `--enroll-file` over `--enroll <TOKEN>` -- an argv value is
 visible in the process table and lands in shell history.
 
+## Keeping it running
+
+`ig daemon` is a foreground process and never forks. Do not reach for `&` and
+`nohup` as the answer to "run it in the background" -- hand it to the platform's
+supervisor instead, which is what survives a crash and a reboot:
+
+```sh
+ig autostart install -- --service ~/.config/ig/services.toml
+```
+
+That writes a systemd user unit or a LaunchAgent, points it at the running
+binary by absolute path, starts it, and enables it at login. `autostart status`
+reports where the unit is and whether it is up; `restart` picks up an upgrade or
+an edited service file; `uninstall` removes it. `--dry-run` prints the unit
+instead of writing it, which is also the fastest way to answer "what exactly
+would this run".
+
+`ig upgrade` replaces the binary with the latest release, checked against the
+release's `SHA256SUMS`. It does not restart anything -- a running daemon keeps
+executing the old code until `ig autostart restart`. On a private repository it
+needs `GH_TOKEN`/`GITHUB_TOKEN` or a logged-in `gh`.
+
 ## Checking that it worked
 
 `ig status` on either side. Read it from the inside to confirm the grant landed,
@@ -271,6 +293,10 @@ ig port expose <port> [--to <key>] [--upstream H:P | --unix P | --routes F]
 ig port unexpose <port> [--to <key>]
 ig port ls                       Exposed ports and what serves each
 ig port bind <port> --local <p>  Land a peer's port elsewhere
+
+ig autostart install [-- <daemon args>]   Supervise it (systemd / launchd)
+ig autostart uninstall | restart | status
+ig upgrade                       Replace this binary with the latest release
 
 ig completion <shell>
 ```

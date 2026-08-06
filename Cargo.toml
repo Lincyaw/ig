@@ -38,6 +38,10 @@ http = "1"
 async-trait = "0.1"
 toml = "1"
 
+# Self-update: both already arrive through iroh, so these cost no build time
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+ring = "0.17"
+
 # Misc
 rand = "0.9"
 libc = "0.2"

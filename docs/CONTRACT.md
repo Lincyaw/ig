@@ -34,7 +34,7 @@ Diffing it between releases is the cheapest way to catch a breaking change.
 | 3 | Not found | Peer unreachable, unknown ticket |
 | 4 | Denied | Refused on authorization grounds |
 | 5 | Conflict | Peer already added, two services claiming one port |
-| 7 | Daemon unavailable | No daemon listening on `--socket` |
+| 7 | Unavailable | No daemon listening on `--socket`; GitHub unreachable for `upgrade`; no `systemctl`/`launchctl` for `autostart` |
 
 Codes 0-9 keep these meanings. Anything specific to a future subcommand will be
 allocated at 10 or above.
@@ -55,6 +55,8 @@ contract. `IG_FORMAT=json` sets it for a whole session.
 | `status` | `{"id", "peers", "exposed", "grants", "bindings"}` |
 | `peer ls` | `{"peers": [...]}` |
 | `port ls` | `{"exposed": [...], "grants": [...]}` |
+| `autostart status` | `{"supervisor", "unit", "installed", "running"}` |
+| `upgrade` | the action shape, plus `"current"`, `"latest"`, `"upgraded"` |
 | any action | `{"ok": true, "dry_run": <bool>, "detail": "<summary>"}` |
 | any failure | `{"ok": false, "error": {"kind": "...", "message": "..."}}` |
 
@@ -85,7 +87,8 @@ expressible as a flag, so a single call always completes it. `--no-input` is
 accepted so a script can assert this, and is reserved against any future prompt.
 
 `--dry-run` is available on every mutating command: `peer add`, `peer rm`,
-`peer pin`, `port expose`, `port unexpose`, `port bind`. It validates
+`peer pin`, `port expose`, `port unexpose`, `port bind`, `autostart install`,
+`autostart uninstall`, `autostart restart`, and `upgrade`. It validates
 everything the real call would -- unparseable keys, invalid route tables,
 missing grantees -- reports what would change, and changes nothing. A dry run
 that would have succeeded exits 0 and sets `"dry_run": true` in JSON output.
@@ -104,6 +107,7 @@ CLI flag > environment variable > built-in default.
 | `IG_FORMAT` | `--format` | `text` |
 | `IG_QUIET` | `--quiet` | off |
 | `RUST_LOG` | | `ig=info` (`ig=warn` under `--quiet`) |
+| `GH_TOKEN`, `GITHUB_TOKEN` | | `upgrade` only; falls back to `gh auth token` |
 
 The daemon's secret key lives at `$XDG_STATE_HOME/ig/key`, falling back to
 `~/.local/state/ig/key`. Override with `--key`. Pins are stored beside it as

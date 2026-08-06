@@ -110,7 +110,10 @@ fn build_request(command: Command) -> Result<Request> {
             },
         },
 
-        Command::Daemon(_) | Command::Completion { .. } => {
+        Command::Daemon(_)
+        | Command::Completion { .. }
+        | Command::Autostart { .. }
+        | Command::Upgrade { .. } => {
             unreachable!("handled before reaching the client")
         }
     })
