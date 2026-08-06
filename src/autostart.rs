@@ -279,9 +279,26 @@ mod platform {
         format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
+    /// The install sequence, as data so a test can hold it to the rule below.
+    ///
+    /// `restart` rather than `enable --now`: --now does nothing to a unit that
+    /// is already running, so installing over one would rewrite the file and
+    /// go on running the arguments you just replaced -- a config change that
+    /// reports success and has no effect. The launchd path unloads first for
+    /// exactly the same reason.
+    pub fn load_plan() -> Vec<Vec<&'static str>> {
+        vec![
+            vec!["--user", "daemon-reload"],
+            vec!["--user", "enable", UNIT],
+            vec!["--user", "restart", UNIT],
+        ]
+    }
+
     pub fn load(_path: &Path) -> Result<()> {
-        run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", UNIT])
+        for args in load_plan() {
+            run("systemctl", &args)?;
+        }
+        Ok(())
     }
 
     pub fn unload(_path: &Path) -> Result<()> {
@@ -408,6 +425,20 @@ mod tests {
         assert!(argv.contains(&"daemon".to_string()));
         // Always spelled out, so the unit stays correct if the default moves.
         assert!(argv.contains(&"--socket".to_string()));
+    }
+
+    /// Installing over a running daemon has to replace it. The bug this
+    /// guards against reported success, rewrote the unit, and left the old
+    /// arguments running -- which is worse than failing, because you go on to
+    /// debug the config you are not running.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn installing_restarts_rather_than_only_enabling() {
+        let plan = platform::load_plan();
+        assert!(
+            plan.iter().any(|args| args.contains(&"restart")),
+            "install would be a no-op against a running unit: {plan:?}"
+        );
     }
 
     #[test]

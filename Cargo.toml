@@ -1,6 +1,6 @@
 [package]
 name = "ig"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Reach a machine's internal network from outside it. Encrypted peer-to-peer port forwarding, with an exposed port backed by a reverse proxy, a tcp forward, or a unix socket. Default deny -- every port granted to exactly the peer you choose."
 license = "MIT"
