@@ -209,6 +209,20 @@ else
 fi
 
 echo
+echo "== the control socket =="
+# Anything that reaches this socket can expose ports and mint enrollment
+# tokens, and the default path is in /tmp.
+MODE=$(stat -c '%a' "$WORK/a.sock" 2>/dev/null || stat -f '%Lp' "$WORK/a.sock")
+check "the socket is 0600"                  "600"                 "$MODE"
+# Unlinking a live daemon's socket does not stop it: it keeps its peers and its
+# bound ports and just stops being reachable, so a "restart" silently doubles.
+$BIN --socket "$WORK/a.sock" daemon --key "$WORK/dup.key" >dup.log 2>&1
+DUP=$?
+check "a second daemon refuses"             "5"                   "$DUP"
+check "and says why"                        "already listening"   "$(cat dup.log)"
+check "the first one is untouched"          "$TICKET_A"           "$(a id)"
+
+echo
 echo "== unexpose retires the service, however it is spelled =="
 # Revoking the one remaining grantee by name reaches the same state as revoking
 # them all, so it has to land the same way.

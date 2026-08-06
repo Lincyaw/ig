@@ -93,6 +93,21 @@ Otherwise build it:
 cargo build --release    # target/release/ig
 ```
 
+## Running it in the background
+
+`ig daemon` stays in the foreground and does not daemonize itself, which is what
+every process supervisor wants: systemd and launchd both track the process they
+started rather than chasing a fork. `contrib/` has a unit for each --
+`ig.service` and `com.github.lincyaw.ig.plist` -- and both restart the daemon if
+it dies. Ad hoc, `setsid nohup ig daemon >/tmp/ig.log 2>&1 &` detaches it from
+the terminal.
+
+Starting a second daemon on a socket another one holds is refused (exit 5)
+rather than granted. Unlinking a live socket would not stop the daemon behind
+it: it would keep its peers and its bound ports and merely become unreachable,
+so what looked like a restart would be two daemons serving the same ports. A
+socket a crash left behind is told apart by connecting to it, and cleaned up.
+
 ## Usage
 
 ```
@@ -222,6 +237,11 @@ token's label and is then spent; pins persist across restarts, so a reboot does
 not orphan enrolled workloads ([ADR 0002](docs/adr/0002-token-enrollment.md)).
 `pin` authorizes a key directly when nothing secret should travel into the
 workload ([ADR 0003](docs/adr/0003-host-attested-enrollment.md)).
+
+That gate is only as good as the control socket in front of it, so the socket is
+bound 0600 and the state directory is created 0700. Anything that can reach the
+socket can expose a port or mint an enrollment token, and the default path is
+under `/tmp`.
 
 This applies to every kind of port equally. A service port is granted like any
 other, and the grant check runs ahead of the dispatch, so it is the single gate.

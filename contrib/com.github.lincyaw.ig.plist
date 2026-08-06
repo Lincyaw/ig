@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent. Install as ~/Library/LaunchAgents/com.github.lincyaw.ig.plist,
+  edit the paths, then:
+
+      launchctl load ~/Library/LaunchAgents/com.github.lincyaw.ig.plist
+      tail -f /tmp/ig.log
+
+  A LaunchAgent, not a LaunchDaemon: ig runs as you, reads your key out of your
+  home directory, and reaches whatever your login session can reach.
+
+  launchd does not rotate StandardErrorPath. If it matters, point it at a file
+  newsyslog manages, or let it go to /dev/null and read `ig status` instead.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.lincyaw.ig</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/ig</string>
+    <string>daemon</string>
+    <string>--service</string>
+    <string>/Users/CHANGEME/.config/ig/services.toml</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if it exits. ig stays in the foreground, so launchd can see it. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/ig.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/ig.log</string>
+</dict>
+</plist>

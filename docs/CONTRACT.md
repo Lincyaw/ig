@@ -107,7 +107,12 @@ CLI flag > environment variable > built-in default.
 
 The daemon's secret key lives at `$XDG_STATE_HOME/ig/key`, falling back to
 `~/.local/state/ig/key`. Override with `--key`. Pins are stored beside it as
-`<key>.peers.json`.
+`<key>.peers.json`. The key is 0600 and a state directory created by `ig` is
+0700; a directory that already exists is left alone.
+
+The control socket is bound 0600: reaching it is enough to expose a port or mint
+an enrollment token. `ig daemon` exits 5 rather than displacing a daemon already
+listening on that path, and clears a socket left behind by one that is gone.
 
 ## Secrets
 

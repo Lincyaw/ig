@@ -10,6 +10,7 @@ use crate::service::Services;
 use anyhow::{anyhow, Context, Result};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use std::collections::BTreeSet;
+use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,6 +43,63 @@ fn default_key_path() -> PathBuf {
     base.join("ig").join("key")
 }
 
+/// Claim the control socket, or refuse to start.
+///
+/// Taking over a path a live daemon is bound to is worse than failing: unlinking
+/// it does not stop that process, which keeps its peers and its bound ports and
+/// simply becomes unreachable by path. What looked like a restart is then two
+/// daemons serving the same ports, and `ig status` only ever shows one of them.
+/// connect(2) is what separates that from the socket a crash left behind -- a
+/// dead one refuses.
+///
+/// The bound socket is 0600 because anything that can reach it can expose ports
+/// and mint enrollment tokens. The default path lives in /tmp, where the umask
+/// would otherwise leave the control plane open to every local user -- which
+/// would make a rather poor showing for a tool whose whole claim is that a port
+/// goes to exactly the peer you name.
+fn bind_control_socket(path: &Path) -> Result<UnixListener> {
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(Failure::new(
+                ErrorKind::Conflict,
+                format!(
+                    "a daemon is already listening on {}; stop it first, or pass \
+                     a different --socket",
+                    path.display()
+                ),
+            )
+            .into())
+        }
+        // Nothing there, or nothing alive behind it.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(e) => {
+            return Err(anyhow!(
+                "cannot tell whether a daemon holds {}: {e}",
+                path.display()
+            ))
+        }
+    }
+
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("failed to bind {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict {}", path.display()))?;
+    }
+
+    Ok(listener)
+}
+
 /// Load the secret key from `path`, or generate one and persist it there.
 /// The key file is 32 raw bytes, created with mode 0600.
 fn load_or_create_key(path: &Path) -> Result<SecretKey> {
@@ -58,7 +116,20 @@ fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     let key = SecretKey::generate(&mut rand::rng());
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        // 0700 on anything created here. The key beside it is 0600 already, but
+        // the pin file is not secret and is still worth protecting: a pin is an
+        // authorization, so somewhere another user can write one is somewhere
+        // they can grant themselves a peer. A directory that already exists is
+        // left as the user set it up.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
@@ -414,8 +485,12 @@ pub async fn run(socket_path: &Path, opts: Options) -> Result<()> {
     }
     let service_ports = services.ports();
 
-    // Clean up old socket
-    let _ = std::fs::remove_file(socket_path);
+    // Claimed before anything else runs. The socket is the only thing making
+    // two daemons on one path mutually exclusive, so binding it first is what
+    // keeps the window between "is anyone there" and "I am now there" from
+    // spanning the whole of startup. Nothing is accepted until the loop below,
+    // so an early client waits rather than talking to a half-built daemon.
+    let listener = bind_control_socket(socket_path)?;
 
     let key_path = key_path.unwrap_or_else(default_key_path);
     let daemon = Daemon::new(&key_path, services).await?;
@@ -461,9 +536,6 @@ pub async fn run(socket_path: &Path, opts: Options) -> Result<()> {
     tokio::spawn(async move {
         accept_daemon.accept_loop().await;
     });
-
-    // Listen for CLI commands on Unix socket
-    let listener = UnixListener::bind(socket_path).context("failed to bind Unix socket")?;
 
     info!("listening on {:?}", socket_path);
 
